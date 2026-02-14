@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GPU Control
+Comment=NVIDIA GPU Power and Clock Control
+Exec=/usr/local/bin/gpu-control
+Icon=nvidia-settings
+Terminal=false
+Categories=System;Settings;
