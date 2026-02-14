@@ -70,7 +70,7 @@ public:
         powerLabel->setStyleSheet("font-size: 13px;");
         powerSpin = new QSpinBox();
         powerSpin->setRange(100, maxPowerLimit);
-        powerSpin->setValue(360);
+        powerSpin->setValue(defaultPowerLimit);
         powerSpin->setSuffix(" W");
         powerSpin->setStyleSheet(spinStyle);
         powerHBox->addWidget(powerLabel);
@@ -98,7 +98,7 @@ public:
         memLabel->setStyleSheet("font-size: 13px;");
         memSpin = new QSpinBox();
         memSpin->setRange(-2000, 6000);
-        memSpin->setValue(3000);
+        memSpin->setValue(0);
         memSpin->setSingleStep(100);
         memSpin->setSuffix(" MHz");
         memSpin->setStyleSheet(spinStyle);
