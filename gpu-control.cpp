@@ -70,7 +70,7 @@ public:
         powerLabel->setStyleSheet("font-size: 13px;");
         powerSpin = new QSpinBox();
         powerSpin->setRange(100, maxPowerLimit);
-        powerSpin->setValue(defaultPowerLimit);
+        powerSpin->setValue(0);
         powerSpin->setSuffix(" W");
         powerSpin->setStyleSheet(spinStyle);
         powerHBox->addWidget(powerLabel);
@@ -80,7 +80,7 @@ public:
 
         // Power ratio label
         auto *powerRatioHBox = new QHBoxLayout();
-        powerRatioLabel = new QLabel(QString("360 / %1 W").arg(maxPowerLimit));
+        powerRatioLabel = new QLabel(QString("0 / %1 W").arg(maxPowerLimit));
         powerRatioLabel->setStyleSheet("font-size: 12px; color: #aaa;");
         powerRatioHBox->addWidget(powerRatioLabel);
         powerRatioHBox->addStretch();
@@ -109,7 +109,7 @@ public:
         auto *equivHBox = new QHBoxLayout();
         auto *equivNote = new QLabel("Afterburner equivalent:");
         equivNote->setStyleSheet("font-size: 12px; color: #aaa;");
-        memEquiv = new QLabel("+1500");
+        memEquiv = new QLabel("0");
         memEquiv->setStyleSheet("font-size: 12px; font-weight: bold; color: #aaa;");
         equivHBox->addWidget(equivNote);
         equivHBox->addWidget(memEquiv);
@@ -199,13 +199,20 @@ public:
 private slots:
     void updateEquiv() {
         int afterburner = memSpin->value() / 2;
-        memEquiv->setText(QString("+%1").arg(afterburner));
+        if (afterburner >= 0)
+            memEquiv->setText(QString("+%1").arg(afterburner));
+        else
+            memEquiv->setText(QString::number(afterburner));
     }
 
     void updatePowerRatio() {
         int current = powerSpin->value();
-        int pct = (current * 100) / maxPowerLimit;
-        powerRatioLabel->setText(QString("%1 / %2 W  (%3%)").arg(current).arg(maxPowerLimit).arg(pct));
+        if (current == 0) {
+            powerRatioLabel->setText(QString("0 / %1 W").arg(maxPowerLimit));
+        } else {
+            int pct = (current * 100) / maxPowerLimit;
+            powerRatioLabel->setText(QString("%1 / %2 W  (%3%)").arg(current).arg(maxPowerLimit).arg(pct));
+        }
     }
 
     void setPreset(int power, int mem, int core) {
@@ -397,6 +404,42 @@ private:
         coreOffProc.waitForFinished(3000);
         QString coreOff = coreOffProc.readAllStandardOutput().trimmed();
 
+        // Get current power limit
+        QProcess powerProc;
+        powerProc.start("nvidia-smi", QStringList()
+            << "--query-gpu=power.limit"
+            << "--format=csv,noheader,nounits");
+        powerProc.waitForFinished(5000);
+        QString powerVal = powerProc.readAllStandardOutput().trimmed().split('.').first();
+
+        // Update spinboxes with current values from GPU (if config wasn't loaded or was empty)
+        QFile configFile(configPath());
+        bool configExists = configFile.exists();
+
+        if (!configExists) {
+            // No config file, try to read current values from GPU
+            bool memOk = false;
+            int memVal = memOff.toInt(&memOk);
+            if (memOk && memOffProc.exitCode() == 0) {
+                memSpin->setValue(memVal);
+            }
+
+            bool coreOk = false;
+            int coreVal = coreOff.toInt(&coreOk);
+            if (coreOk && coreOffProc.exitCode() == 0) {
+                coreSpin->setValue(coreVal);
+            }
+
+            bool powerOk = false;
+            int powerInt = powerVal.toInt(&powerOk);
+            if (powerOk && powerInt > 0) {
+                powerSpin->setValue(powerInt);
+            }
+
+            updateEquiv();
+            updatePowerRatio();
+        }
+
         if (!smiOut.isEmpty()) {
             QStringList parts = smiOut.split(",");
             QString power = parts.size() > 0 ? parts[0].trimmed().split(".").first() + "W" : "?";
@@ -412,6 +455,43 @@ private:
         QString setupPath = QDir::homePath() + "/.local/bin/gpu-control-setup.sh";
         QDir().mkpath(QDir::homePath() + "/.local/bin");
 
+        // Also create a startup script that will be called by the service
+        QString scriptPath = QDir::homePath() + "/.local/bin/gpu-control-startup.sh";
+        QFile script(scriptPath);
+        if (script.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream s(&script);
+            s << "#!/bin/bash\n";
+            s << "# GPU Control startup script\n";
+            s << "# This script applies saved GPU settings on boot\n\n";
+            s << "export DISPLAY=:0\n";
+            s << "export XAUTHORITY=/run/user/1000/gdm/Xauthority\n\n";
+            s << "# Wait for nvidia driver to be ready\n";
+            s << "for i in {1..30}; do\n";
+            s << "    if nvidia-smi -L >/dev/null 2>&1; then\n";
+            s << "        break\n";
+            s << "    fi\n";
+            s << "    sleep 1\n";
+            s << "done\n\n";
+            s << "# Apply power limit\n";
+            s << "nvidia-smi -pl " << power << "\n\n";
+            s << "# Wait for X display to be ready and apply clock offsets\n";
+            s << "sleep 5\n";
+            s << "for i in {1..30}; do\n";
+            s << "    if [ -n \"$DISPLAY\" ] && nvidia-settings -q [gpu:0]/GPUMemoryTransferRateOffsetAllPerformanceLevels >/dev/null 2>&1; then\n";
+            s << "        nvidia-settings -a [gpu:0]/GPUMemoryTransferRateOffsetAllPerformanceLevels=" << mem << "\n";
+            s << "        nvidia-settings -a [gpu:0]/GPUGraphicsClockOffsetAllPerformanceLevels=" << core << "\n";
+            s << "        logger \"GPU Control: Settings applied successfully\"\n";
+            s << "        exit 0\n";
+            s << "    fi\n";
+            s << "    sleep 2\n";
+            s << "done\n\n";
+            s << "logger \"GPU Control: Failed to apply settings\"\n";
+            s << "exit 1\n";
+            script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner |
+                                  QFile::ReadGroup | QFile::ExeGroup |
+                                  QFile::ReadOther | QFile::ExeOther);
+        }
+
         QFile setup(setupPath);
         if (setup.open(QIODevice::WriteOnly | QIODevice::Text)) {
             QTextStream out(&setup);
@@ -420,16 +500,14 @@ private:
             out << "[Unit]\n";
             out << "Description=GPU Control - Power and Clock Offsets\n";
             out << "After=nvidia-persistenced.service display-manager.service\n";
+            out << "After=graphical-session.target\n";
             out << "Wants=display-manager.service\n\n";
             out << "[Service]\n";
             out << "Type=oneshot\n";
             out << "RemainAfterExit=yes\n";
-            out << "ExecStart=/usr/bin/nvidia-smi -pl " << power << "\n";
-            out << "ExecStartPost=/bin/sleep 3\n";
-            out << "ExecStartPost=/usr/bin/nvidia-settings -a [gpu:0]/GPUMemoryTransferRateOffsetAllPerformanceLevels=" << mem << "\n";
-            out << "ExecStartPost=/usr/bin/nvidia-settings -a [gpu:0]/GPUGraphicsClockOffsetAllPerformanceLevels=" << core << "\n\n";
+            out << "ExecStart=" << scriptPath << "\n\n";
             out << "[Install]\n";
-            out << "WantedBy=multi-user.target\n";
+            out << "WantedBy=graphical.target\n";
             out << "SERVICEEOF\n";
             out << "systemctl daemon-reload\n";
             out << "systemctl enable gpu-control.service\n";
